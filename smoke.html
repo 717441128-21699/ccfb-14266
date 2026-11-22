@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>浏览器自检</title>
+    <style>
+      body { font-family: monospace; background: #0f1623; color: #d7e0ee; padding: 20px; }
+      .ok { color: #22c55e; }
+      .bad { color: #ef4444; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h2>浏览器环境自检</h2>
+    <pre id="out">运行中…</pre>
+    <script type="module">
+      const out = document.getElementById('out');
+      const lines = [];
+      const log = (msg, ok = true) => lines.push(`${ok ? '✅' : '❌'} ${msg}`);
+      try {
+        const { synthesize } = await import('/src/core/synthesis.ts');
+        const { runCpuPipeline } = await import('/src/core/pipeline.ts');
+        const { evaluateMinutiae } = await import('/src/core/metrics.ts');
+
+        // WebGL2 能力
+        const c = document.createElement('canvas');
+        const gl = c.getContext('webgl2');
+        const floatExt = gl && gl.getExtension('EXT_color_buffer_float');
+        log(`WebGL2: ${gl ? '可用' : '不可用'}, EXT_color_buffer_float: ${floatExt ? '可用' : '不可用'}`, !!gl && !!floatExt);
+
+        // 合成 + 全流水线
+        const t0 = performance.now();
+        const { image, groundTruth } = synthesize({
+          width: 384, height: 384, seed: 123, model: 'loop', ridgePeriod: 10,
+          backgrounds: ['fabric', 'banknote'], backgroundStrength: 0.9, noiseSigma: 7, minutiaCount: 10,
+        });
+        const result = runCpuPipeline(image, 'browser-smoke');
+        const elapsed = performance.now() - t0;
+        log(`流水线 9 阶段:${result.stages.length === 9 ? '齐全' : '缺失'}`);
+        log(`阶段名:${result.stages.map((s) => s.name).join(' → ')}`);
+        log(`特征点检出:${result.minutiae.length} 个(端点 ${result.minutiae.filter((m) => m.type === 'ending').length} / 分叉 ${result.minutiae.filter((m) => m.type === 'bifurcation').length})`);
+
+        const m = evaluateMinutiae(result.minutiae, groundTruth.minutiae, 4);
+        log(`真值匹配:TP=${m.truePositives}, 平均误差=${m.meanLocationError.toFixed(2)}px, ≤3px占比=${(m.within3pxRate * 100).toFixed(0)}%`);
+        log(`平均误差 ≤3px:${m.meanLocationError <= 3}`, m.meanLocationError <= 3);
+        log(`384px 端到端耗时 ${elapsed.toFixed(0)}ms(≤4000ms:${elapsed <= 4000})`, elapsed <= 4000);
+
+        // 快照可绘制
+        const snap = result.enhanced.toImageData();
+        log(`增强结果 ImageData:${snap.width}×${snap.height}`);
+        const pass = result.stages.length === 9 && m.meanLocationError <= 3 && elapsed <= 4000;
+        lines.push('', pass ? '🎉 全部自检通过' : '⚠ 存在未通过项');
+        out.style.color = pass ? '#22c55e' : '#ef4444';
+      } catch (e) {
+        lines.push(`❌ 异常:${e.stack || e.message || e}`);
+        out.style.color = '#ef4444';
+      }
+      out.textContent = lines.join('\n');
+      window.__smokeDone = true;
+    </script>
+  </body>
+</html>

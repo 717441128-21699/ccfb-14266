@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WebGL2 引擎自检</title>
+    <style>body { font-family: monospace; background: #0f1623; color: #d7e0ee; padding: 20px; }</style>
+  </head>
+  <body>
+    <pre id="out">运行中…</pre>
+    <script type="module">
+      const out = document.getElementById('out');
+      const lines = [];
+      const log = (m, ok = true) => lines.push(`${ok ? '✅' : '❌'} ${m}`);
+      try {
+        const { GlEngine } = await import('/src/gl/engine.ts');
+        const { SHADERS } = await import('/src/gl/shaders.ts');
+        const { GlProgram } = await import('/src/gl/engine.ts');
+        const { GrayImage } = await import('/src/core/image.ts');
+        const { gaussianKernel1d } = await import('/src/core/filters.ts');
+
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 128;
+        const engine = new GlEngine(canvas);
+        log('GlEngine 初始化 + 浮点纹理');
+
+        // 编译全部着色器(编译错误会抛异常)
+        const progs = {};
+        for (const [name, src] of Object.entries(SHADERS)) {
+          progs[name] = new GlProgram(engine.gl, src);
+          log(`着色器编译:${name}`);
+        }
+
+        // 跑一遍高斯 pass,读回验证数值合法
+        const w = 128, h = 128;
+        const data = new Float32Array(w * h);
+        for (let i = 0; i < data.length; i++) data[i] = 100 + 80 * Math.sin(i * 0.3);
+        engine.upload(data, w, h);
+        const kernel = gaussianKernel1d(1.2);
+        const r = (kernel.length - 1) >> 1;
+        const padded = new Float32Array(31);
+        padded.set(kernel, 15 - r);
+        const g = progs.gaussian;
+        g.use();
+        engine.gl.uniform1fv(g.uniform('u_kernel'), padded);
+        engine.gl.uniform1i(g.uniform('u_radius'), r);
+        engine.gl.uniform1i(g.uniform('u_horizontal'), 1);
+        engine.runPass(g, () => {});
+        g.use();
+        engine.gl.uniform1fv(g.uniform('u_kernel'), padded);
+        engine.gl.uniform1i(g.uniform('u_radius'), r);
+        engine.gl.uniform1i(g.uniform('u_horizontal'), 0);
+        engine.runPass(g, () => {});
+        const back = engine.readback();
+        const finite = Array.from(back).every((v) => Number.isFinite(v) && v >= 0 && v <= 255);
+        log(`GPU 高斯读回 ${back.length} 像素,全部有限且在 [0,255]:${finite}`, finite);
+
+        // Gabor pass(构造一个规则方向/频率场)
+        const field = new Float32Array(w * h * 4);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const theta = 0;
+          field[i] = Math.cos(2 * theta);
+          field[i + 1] = Math.sin(2 * theta);
+          field[i + 2] = 0.1;
+          field[i + 3] = 0.8;
+        }
+        engine.upload(data, w, h);
+        engine.uploadField(field, w, h);
+        const gp = progs.gabor;
+        gp.use();
+        engine.bindExtra(1, engine.getFieldTexture());
+        engine.gl.uniform1i(gp.uniform('u_field'), 1);
+        engine.gl.uniform1f(gp.uniform('u_sigmaXFactor'), 0.5);
+        engine.gl.uniform1f(gp.uniform('u_sigmaYFactor'), 0.5);
+        engine.gl.uniform1f(gp.uniform('u_radiusFactor'), 3);
+        engine.gl.uniform1f(gp.uniform('u_coherenceGate'), 0.15);
+        engine.runPass(gp, () => {});
+        const gab = engine.readback();
+        const gabOk = Array.from(gab).every((v) => Number.isFinite(v));
+        log(`GPU Gabor 增强读回合法:${gabOk}`, gabOk);
+
+        engine.dispose();
+        lines.push('', '🎉 WebGL2 全部 pass 自检通过');
+        out.style.color = '#22c55e';
+      } catch (e) {
+        lines.push(`❌ 异常:${e.stack || e.message || e}`);
+        out.style.color = '#ef4444';
+      }
+      out.textContent = lines.join('\n');
+      window.__glSmokeDone = true;
+    </script>
+  </body>
+</html>
